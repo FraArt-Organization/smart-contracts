@@ -898,7 +898,8 @@ contract FraPeerMarket is ReentrancyGuard, Auth {
         bool status;
     }
     mapping (uint256 => BookOrder) public bookOrders;
-    mapping (address => uint256) public userBook;
+    // seller => (bookToken => orderId)
+    mapping (address => mapping(address => uint256)) public userBook;
     
     constructor() Auth(msg.sender) {
         marketer = msg.sender;
@@ -915,15 +916,15 @@ contract FraPeerMarket is ReentrancyGuard, Auth {
         fee = _fee;
     }
 
-    function checkBookOrder(address _user) public view returns(BookOrder memory _bookOrder) {
-        if (userBook[_user] == type(uint256).max || userBook[_user] == 0) revert("Not found");
-        return bookOrders[userBook[_user]];
+    function checkBookOrder(address _user, address _bookToken) public view returns(BookOrder memory _bookOrder) {
+        if (userBook[_user][_bookToken] == type(uint256).max || userBook[_user][_bookToken] == 0) revert("Not found");
+        return bookOrders[userBook[_user][_bookToken]];
     }
 
     function createOrder(address _bookToken, uint256 _bookAmount, uint256 _bookPrice) public returns (uint256) {
         address _seller = msg.sender;
         require(_bookAmount > 0 && _bookPrice > 0, "Invalid order");
-        require(userBook[_seller] == 0 && userBook[_seller] == type(uint256).max, "You have an order already");
+        require(userBook[_seller][_bookToken] == 0 || userBook[_seller][_bookToken] == type(uint256).max, "You have an order already");
         IERC20(_bookToken).transferFrom(_seller, address(this), _bookAmount);
         currentOrderId = currentOrderId.add(1);
         BookOrder memory order;
@@ -932,8 +933,9 @@ contract FraPeerMarket is ReentrancyGuard, Auth {
         order.bookAmount = _bookAmount;
         order.bookPrice = _bookPrice;
         order.seller = _seller;
+        order.status = true;
         bookOrders[currentOrderId] = order;
-        userBook[_seller] = currentOrderId;
+        userBook[_seller][_bookToken] = currentOrderId;
         emit CreateOrder(currentOrderId, _bookToken, _bookAmount, _bookPrice, _seller);
         return currentOrderId;
     }
@@ -948,6 +950,7 @@ contract FraPeerMarket is ReentrancyGuard, Auth {
         require(msg.value >= _requiredExecAmount, "insufficient balance");
         uint256 _requiredExecFeeAmount = _requiredExecAmount.mul(fee) / _UNIT;
         uint256 _requiredExecNetAmount = _requiredExecAmount - _requiredExecFeeAmount;
+        IERC20(bookOrders[_orderId].bookToken).approve(address(this), _requiredBookAmount);
         IERC20(order.bookToken).safeTransferFrom(address(this), _buyer, _requiredBookAmount);
         payable(marketer).transfer(_requiredExecFeeAmount);
         payable(order.seller).transfer(_requiredExecNetAmount);
@@ -964,7 +967,7 @@ contract FraPeerMarket is ReentrancyGuard, Auth {
     function updateOrder(uint256 _orderId, uint256 _bookAmount, uint256 _bookPrice) public nonReentrant {
         address _seller = msg.sender;
         BookOrder memory order = bookOrders[_orderId];
-        require(userBook[_seller] == _orderId && order.status, "Unavailable Order");
+        require(userBook[_seller][order.bookToken] == _orderId && order.status, "Unavailable Order");
         if (order.bookAmount > _bookAmount) {
             uint256 _amount = order.bookAmount.sub(_bookAmount);
             IERC20(order.bookToken).transferFrom(address(this), order.seller, _amount);
@@ -980,12 +983,15 @@ contract FraPeerMarket is ReentrancyGuard, Auth {
 
     function cancelOrder(uint256 _orderId) public nonReentrant {
         address _seller = msg.sender;
-        require(userBook[_seller] == _orderId && bookOrders[_orderId].status, "Unavailable Order");
-        userBook[_seller] = type(uint256).max;
-        bookOrders[_orderId].status = false;
-        uint256 _availableAmount = bookOrders[_orderId].bookAmount;
-        bookOrders[_orderId].bookAmount = 0;
-        IERC20(bookOrders[_orderId].bookToken).transferFrom(address(this), _seller, _availableAmount);
+        BookOrder memory order = bookOrders[_orderId];
+        require(userBook[_seller][order.bookToken] == _orderId && order.status, "Unavailable Order");
+        userBook[_seller][order.bookToken] = type(uint256).max;
+        order.status = false;
+        uint256 _availableAmount = order.bookAmount;
+        order.bookAmount = 0;
+        IERC20(bookOrders[_orderId].bookToken).approve(address(this), _availableAmount);
+        IERC20(bookOrders[_orderId].bookToken).safeTransferFrom(address(this), _seller, _availableAmount);
+        bookOrders[_orderId] = order;
         emit CancelOrder(_orderId);
     }
 
